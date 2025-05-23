@@ -1,7 +1,7 @@
 # Use a lightweight Python base image
 FROM python:3.9-slim
 
-# its working
+# its working fine
 # Set environment variables - keeps Python from writing .pyc files and buffers stdout/stderr
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
