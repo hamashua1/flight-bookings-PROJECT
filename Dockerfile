@@ -11,6 +11,7 @@ WORKDIR /app
 # Copy project files
 COPY . /app/
 
+# for testing
 # Install dependencies (if any)
 RUN pip install -r requirements.txt
 
