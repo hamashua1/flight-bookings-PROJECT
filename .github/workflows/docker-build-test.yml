@@ -1,13 +1,26 @@
-name: Test and Docker Build
+name: Test and Deploy
 
 on:
+  # Trigger on pull requests to develop branch
+  pull_request:
+    branches:
+      - develop
+    types: [opened, synchronize, reopened]  # Run on PR creation, updates, and reopening
+  # Trigger on pushes to develop (after PR merge) and main
   push:
     branches:
+      - develop
       - main
 
 jobs:
+  # First job: Run tests on pull requests to develop
   test:
+    # Only run tests on pull requests to develop
+    if: github.event_name == 'pull_request' && github.base_ref == 'develop'
     runs-on: self-hosted
+    # This makes the test job a required check for merging
+    environment:
+      name: test-environment
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
@@ -22,25 +35,47 @@ jobs:
         python3 -m pip install pytest
 
     - name: Run unit tests
+      id: run-tests  # Add an ID to reference this step
       run: |
         python3 -m pytest test_flight_booking.py -v
+        if [ $? -ne 0 ]; then
+          echo "::error::Tests failed - Merge to develop will be blocked"
+          exit 1
+        fi
+        echo "::notice::All tests passed - Merge button will be enabled"
 
-  docker-build:
+  # Second job: Push to main after successful merge to develop
+  push-to-main:
+    # Only run after successful merges to develop
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
     needs: test
     runs-on: self-hosted
     steps:
     - name: Checkout code
       uses: actions/checkout@v3
 
-    - name: Login to Docker Hub
-      uses: docker/login-action@v2
-      with:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
+    - name: Push to main
+      run: |
+        git config --global user.name 'GitHub Actions'
+        git config --global user.email 'github-actions@github.com'
+        git checkout main || git checkout -b main
+        git pull origin main
+        git merge develop
+        git push origin main
+        echo "Code successfully pushed to main branch"
 
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v4
-      with:
-        context: .
-        push: true
-        tags: ${{ secrets.DOCKERHUB_USERNAME }}/flight-booking:latest 
+  # Third job: Verify main branch
+  verify-main:
+    # Only run after code is pushed to main
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: push-to-main
+    runs-on: self-hosted
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Verify main branch
+      run: |
+        echo "Verifying code on main branch..."
+        python3 -m pytest test_flight_booking.py -v
+        echo "Main branch verification complete"
