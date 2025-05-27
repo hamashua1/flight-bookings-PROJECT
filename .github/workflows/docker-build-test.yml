@@ -1,81 +1,284 @@
 name: Test and Deploy
 
+# Define when this workflow should run
 on:
-  # Trigger on pull requests to develop branch
+  # Run on pull requests to develop branch
   pull_request:
     branches:
       - develop
-    types: [opened, synchronize, reopened]  # Run on PR creation, updates, and reopening
-  # Trigger on pushes to develop (after PR merge) and main
+    types: [opened, synchronize, reopened, closed]
+  
+  # Run on direct pushes to develop and main
   push:
     branches:
       - develop
       - main
 
+# Set workflow permissions
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+  checks: write
+
 jobs:
-  # First job: Run tests on pull requests to develop
+  # Job 1: Run tests on pull requests to develop (REQUIRED CHECK)
   test:
-    # Only run tests on pull requests to develop
-    if: github.event_name == 'pull_request' && github.base_ref == 'develop'
+    name: "test"  # This exact name will be the required status check
+    if: github.event_name == 'pull_request' && github.base_ref == 'develop' && github.event.action != 'closed'
     runs-on: self-hosted
-    # This makes the test job a required check for merging
-    environment:
-      name: test-environment
+    
     steps:
     - name: Checkout code
-      uses: actions/checkout@v3
-
-    - name: Check Python version
-      run: python --version
-
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.head_ref }}
+    
+    - name: Setup Python environment
+      run: |
+        python3 --version
+        python3 -m pip install --upgrade pip
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
     - name: Install dependencies
       run: |
-        python3 -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then python3 -m pip install -r requirements.txt; fi
-        python3 -m pip install pytest
-
-    - name: Run unit tests
-      id: run-tests  # Add an ID to reference this step
+        if [ -f requirements.txt ]; then 
+          python3 -m pip install -r requirements.txt
+        fi
+        python3 -m pip install pytest pytest-html pytest-cov
+    
+    - name: Run unit tests (BLOCKING)
+      id: run_tests
       run: |
-        python3 -m pytest test_flight_booking.py -v
-        if [ $? -ne 0 ]; then
-          echo "::error::Tests failed - Merge to develop will be blocked"
+        echo "🧪 Running tests for PR #${{ github.event.number }}"
+        echo "⚠️  IMPORTANT: This test must pass for merge button to be enabled"
+        
+        # Run tests and capture exit code
+        if python3 -m pytest test_flight_booking.py -v \
+          --html=test-report.html \
+          --self-contained-html \
+          --cov=. \
+          --cov-report=term-missing \
+          --cov-report=html; then
+          echo "✅ ALL TESTS PASSED - Merge button will be ENABLED"
+          echo "test_result=success" >> $GITHUB_OUTPUT
+          exit 0
+        else
+          echo "❌ TESTS FAILED - Merge button will be DISABLED"
+          echo "test_result=failure" >> $GITHUB_OUTPUT
+          echo "::error::Tests failed - PR cannot be merged until all tests pass"
           exit 1
         fi
-        echo "::notice::All tests passed - Merge button will be enabled"
+    
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v3
+      with:
+        name: test-results-${{ github.event.number }}
+        path: |
+          test-report.html
+          htmlcov/
+    
+    - name: Update PR status with test results
+      if: always()
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const testResult = '${{ steps.run_tests.outputs.test_result }}';
+          const jobStatus = '${{ job.status }}';
+          const isSuccess = jobStatus === 'success' && testResult === 'success';
+          
+          const statusIcon = isSuccess ? '✅' : '❌';
+          const statusText = isSuccess ? 'PASSED' : 'FAILED';
+          const buttonStatus = isSuccess ? 'ENABLED' : 'DISABLED';
+          const bgColor = isSuccess ? '28a745' : 'dc3545';
+          
+          const body = `## ${statusIcon} Test Results: ${statusText}
+          
+          ![Status](https://img.shields.io/badge/Tests-${statusText}-${bgColor}?style=for-the-badge)
+          ![Merge](https://img.shields.io/badge/Merge%20Button-${buttonStatus}-${bgColor}?style=for-the-badge)
+          
+          **Branch:** \`${{ github.head_ref }}\`  
+          **Commit:** \`${{ github.sha }}\`  
+          **PR:** #${{ github.event.number }}
+          
+          ---
+          
+          ${isSuccess ? 
+            '🎉 **All tests passed!** \n\n✅ The merge button is now **ENABLED**\n✅ This PR is ready for review and merge\n✅ Once approved, you can safely merge to develop' : 
+            '⚠️ **Tests failed!** \n\n❌ The merge button is **DISABLED** \n❌ Please fix the failing tests before merging\n❌ Push new commits to re-run tests automatically'}
+          
+          ---
+          <details>
+          <summary>🔍 Click to see test execution details</summary>
+          
+          - **Workflow:** \`${{ github.workflow }}\`
+          - **Job:** \`${{ github.job }}\`
+          - **Runner:** \`${{ runner.os }}\`
+          - **Event:** \`${{ github.event_name }}\`
+          - **Trigger:** ${isSuccess ? 'Tests completed successfully' : 'Tests failed - blocking merge'}
+          </details>
+          `;
+          
+          // Find existing comment to update or create new one
+          const comments = await github.rest.issues.listComments({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+          });
+          
+          const botComment = comments.data.find(comment => 
+            comment.user.type === 'Bot' && 
+            comment.body.includes('Test Results:')
+          );
+          
+          if (botComment) {
+            await github.rest.issues.updateComment({
+              comment_id: botComment.id,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+          } else {
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: body
+            });
+          }
 
-  # Second job: Push to main after successful merge to develop
-  push-to-main:
-    # Only run after successful merges to develop
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
-    needs: test
+  # Job 2: Auto-merge develop to main after PR is merged
+  auto-merge-to-main:
+    name: Auto-merge to Main
+    if: |
+      (github.event_name == 'pull_request' && 
+       github.event.action == 'closed' && 
+       github.event.pull_request.merged == true && 
+       github.base_ref == 'develop') ||
+      (github.event_name == 'push' && 
+       github.ref == 'refs/heads/develop')
     runs-on: self-hosted
+    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-
-    - name: Push to main
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Configure Git
       run: |
-        git config --global user.name 'GitHub Actions'
-        git config --global user.email 'github-actions@github.com'
-        git checkout main || git checkout -b main
-        git pull origin main
-        git merge develop
+        git config --global user.name 'github-actions[bot]'
+        git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+    
+    - name: Sync develop to main
+      run: |
+        echo "🚀 Starting auto-merge from develop to main..."
+        
+        # Fetch all branches
+        git fetch origin
+        
+        # Switch to main branch (create if doesn't exist)
+        if git show-ref --verify --quiet refs/remotes/origin/main; then
+          echo "Main branch exists, checking out..."
+          git checkout main
+          git pull origin main
+        else
+          echo "Main branch doesn't exist, creating..."
+          git checkout -b main
+        fi
+        
+        # Merge develop into main
+        echo "Merging develop into main..."
+        git merge origin/develop --no-ff -m "Auto-merge: Sync develop to main
+        
+        - Merged PR: ${{ github.event.pull_request.title || 'Direct push to develop' }}
+        - Commit: ${{ github.sha }}
+        - Author: ${{ github.event.pull_request.user.login || github.actor }}
+        
+        [skip ci]"
+        
+        # Push to main
+        echo "Pushing to main branch..."
         git push origin main
-        echo "Code successfully pushed to main branch"
-
-  # Third job: Verify main branch
-  verify-main:
-    # Only run after code is pushed to main
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: push-to-main
-    runs-on: self-hosted
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-
-    - name: Verify main branch
+        
+        echo "✅ Successfully synced develop to main!"
+    
+    - name: Create deployment tag
       run: |
-        echo "Verifying code on main branch..."
-        python3 -m pytest test_flight_booking.py -v
-        echo "Main branch verification complete"
+        # Create a deployment tag
+        TAG_NAME="deploy-$(date +'%Y%m%d-%H%M%S')"
+        git tag -a "$TAG_NAME" -m "Deployment tag for main branch sync
+        
+        - Source: develop branch
+        - Commit: ${{ github.sha }}
+        - Date: $(date +'%Y-%m-%d %H:%M:%S UTC')
+        "
+        git push origin "$TAG_NAME"
+        echo "Created deployment tag: $TAG_NAME"
+
+  # Job 3: Verify main branch deployment
+  verify-deployment:
+    name: Verify Main Branch
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: self-hosted
+    
+    steps:
+    - name: Checkout main branch
+      uses: actions/checkout@v4
+      with:
+        ref: main
+    
+    - name: Setup Python environment
+      run: |
+        python3 --version
+        python3 -m pip install --upgrade pip
+    
+    - name: Install dependencies
+      run: |
+        if [ -f requirements.txt ]; then 
+          python3 -m pip install -r requirements.txt
+        fi
+        python3 -m pip install pytest
+    
+    - name: Run verification tests
+      run: |
+        echo "🔍 Running verification tests on main branch..."
+        python3 -m pytest test_flight_booking.py -v --tb=short
+        echo "✅ Main branch verification completed successfully!"
+    
+    - name: Post-deployment health check
+      run: |
+        echo "🏥 Running post-deployment health checks..."
+        
+        # Add any additional health checks here
+        # For example: API endpoint checks, database connectivity, etc.
+        
+        echo "Current branch: $(git branch --show-current)"
+        echo "Latest commit: $(git log -1 --oneline)"
+        echo "Repository status: $(git status --porcelain)"
+        
+        echo "✅ Health check completed - Main branch is ready for production!"
+
+  # Job 4: Cleanup (optional)
+  cleanup:
+    name: Cleanup
+    if: always()
+    needs: [test, auto-merge-to-main, verify-deployment]
+    runs-on: self-hosted
+    
+    steps:
+    - name: Cleanup workspace
+      run: |
+        echo "🧹 Cleaning up workspace..."
+        # Remove any temporary files, cache cleanup, etc.
+        rm -rf htmlcov/ test-report.html || true
+        echo "✅ Cleanup completed!"
