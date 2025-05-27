@@ -5,138 +5,77 @@ on:
   pull_request:
     branches:
       - develop
-    types: [opened, synchronize, reopened]
-  
-  # Trigger on pushes to develop and main branches
+    types: [opened, synchronize, reopened]  # Run on PR creation, updates, and reopening
+  # Trigger on pushes to develop (after PR merge) and main
   push:
     branches:
       - develop
       - main
 
 jobs:
-  # Run tests on pull requests to develop
+  # First job: Run tests on pull requests to develop
   test:
+    # Only run tests on pull requests to develop
     if: github.event_name == 'pull_request' && github.base_ref == 'develop'
     runs-on: self-hosted
+    # This makes the test job a required check for merging
     environment:
       name: test-environment
-    
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.x'
-        
-    - name: Cache pip dependencies
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
-          
+      uses: actions/checkout@v3
+
+    - name: Check Python version
+      run: python --version
+
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        pip install pytest
-        
+        python3 -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then python3 -m pip install -r requirements.txt; fi
+        python3 -m pip install pytest
+
     - name: Run unit tests
+      id: run-tests  # Add an ID to reference this step
       run: |
-        python -m pytest test_flight_booking.py -v --tb=short
-        
-    - name: Test Results
-      if: always()
-      run: |
-        if [ ${{ job.status }} == 'success' ]; then
-          echo "::notice::All tests passed - PR can be merged"
-        else
-          echo "::error::Tests failed - PR merge blocked"
+        python3 -m pytest test_flight_booking.py -v
+        if [ $? -ne 0 ]; then
+          echo "::error::Tests failed - Merge to develop will be blocked"
+          exit 1
         fi
+        echo "::notice::All tests passed - Merge button will be enabled"
 
-  # Deploy to main after successful push to develop
-  deploy-to-main:
+  # Second job: Push to main after successful merge to develop
+  push-to-main:
+    # Only run after successful merges to develop
     if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    needs: test
     runs-on: self-hosted
-    
     steps:
-    - name: Checkout develop branch
-      uses: actions/checkout@v4
-      with:
-        ref: develop
-        fetch-depth: 0  # Fetch full history for merge
-        token: ${{ secrets.GITHUB_TOKEN }}
-        
-    - name: Configure Git
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Push to main
       run: |
-        git config --local user.name "github-actions[bot]"
-        git config --local user.email "github-actions[bot]@users.noreply.github.com"
-        
-    - name: Merge develop to main
-      run: |
-        # Switch to main branch
+        git config --global user.name 'GitHub Actions'
+        git config --global user.email 'github-actions@github.com'
         git checkout main || git checkout -b main
-        git pull origin main || echo "Main branch doesn't exist yet, creating..."
-        
-        # Merge develop into main
-        git merge develop --no-ff -m "Auto-merge develop to main via GitHub Actions"
-        
-        # Push to main
+        git pull origin main
+        git merge develop
         git push origin main
-        
-    - name: Create deployment summary
-      run: |
-        echo "::notice::Successfully deployed develop branch to main"
-        echo "Commit SHA: ${{ github.sha }}"
-        echo "Deployed at: $(date)"
+        echo "Code successfully pushed to main branch"
 
-  # Verify deployment on main branch
-  verify-deployment:
+  # Third job: Verify main branch
+  verify-main:
+    # Only run after code is pushed to main
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: push-to-main
     runs-on: self-hosted
-    
     steps:
-    - name: Checkout main branch
-      uses: actions/checkout@v4
-      with:
-        ref: main
-        
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.x'
-        
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        pip install pytest
-        
-    - name: Run verification tests
-      run: |
-        echo "Running verification tests on main branch..."
-        python -m pytest test_flight_booking.py -v --tb=short
-        
-    - name: Deployment verification complete
-      run: |
-        echo "::notice::Main branch verification successful"
-        echo "Deployment verified at: $(date)"
-        echo "Main branch is ready for production use"
+    - name: Checkout code
+      uses: actions/checkout@v3
 
-  # Optional: Notify on workflow completion
-  notify:
-    if: always()
-    needs: [test, deploy-to-main, verify-deployment]
-    runs-on: self-hosted
-    
-    steps:
-    - name: Workflow Summary
+    - name: Verify main branch
       run: |
-        echo "## Workflow Summary" >> $GITHUB_STEP_SUMMARY
-        echo "- **Event**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
-        echo "- **Status**: ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+        echo "Verifying code on main branch..."
+        python3 -m pytest test_flight_booking.py -v
+        echo "Main branch verification complete"
