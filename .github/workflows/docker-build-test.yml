@@ -5,7 +5,7 @@ on:
   pull_request:
     branches:
       - develop
-    types: [opened, synchronize, reopened]  # Run on PR creation, updates, and reopening
+    types: [opened,reopened]  # Run on PR creation, updates, and reopening
   # Trigger on pushes to develop (after PR merge) and main
   push:
     branches:
